@@ -1,20 +1,20 @@
 # Dockerfile
 FROM python:3.11-slim
 
-# avoid interactive prompts
+# Prevent interactive prompts during package install
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    CHROME_BIN=/usr/bin/chromium
+    CHROME_BIN=/usr/bin/chromium \
+    CHROMEDRIVER_PATH=/usr/bin/chromedriver
 
-# Install chromium and fonts + required libs
+# Install system dependencies and Chromium/ChromeDriver
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       chromium \
       chromium-driver \
       wget \
       ca-certificates \
-      unzip \
       fonts-liberation \
       libnss3 \
       libatk1.0-0 \
@@ -26,23 +26,20 @@ RUN apt-get update && \
       libxrandr2 \
       libgbm1 \
       xdg-utils \
-      libasound2 \
-    && rm -rf /var/lib/apt/lists/*
+      libasound2 && \
+    rm -rf /var/lib/apt/lists/*
 
-# Create app dir
 WORKDIR /app
 
-# Copy requirements and install
+# Copy requirements and install Python dependencies
 COPY requirements.txt .
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt
 
-# Copy application code
+# Copy the rest of the code
 COPY . .
 
-# Expose the port uvicorn will use
-ENV PORT=8000
 EXPOSE 8000
 
-# uvicorn will serve app:app; ensure app filename matches your repo file (app.py)
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--loop", "auto", "--workers", "1", "--timeout-keep-alive", "60"]
+# Run the FastAPI app with Uvicorn
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "auto", "--timeout-keep-alive", "60"]

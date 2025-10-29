@@ -1,8 +1,10 @@
 # app.py
 import asyncio
 import base64
+import os
 import time
 import traceback
+import shutil
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -12,6 +14,9 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+# webdriver-manager will auto-download chromedriver when needed
+from webdriver_manager.chrome import ChromeDriverManager
 
 # ----- Configurable defaults -----
 DEFAULT_WAIT_TIME = 25
@@ -42,7 +47,7 @@ class BoostResponse(BaseModel):
     screenshot_base64: Optional[str] = None
 
 
-# ---- Helper functions used inside worker ----
+# ---- Helper functions ----
 def get_element_text_via_js(drv, el):
     try:
         txt = drv.execute_script(
@@ -121,6 +126,56 @@ def js_count_in_iframes(drv, selector):
     return counts
 
 
+# ---- Driver factory (auto-detects everything) ----
+def get_driver(headless: bool = True, timeout: int = 60):
+    """
+    Create a Chrome webdriver without requiring manual chromedriver/chrome paths.
+    - Detects a Chrome/Chromium binary using environment or shutil.which
+    - Uses webdriver-manager to download a compatible chromedriver automatically
+    """
+    options = webdriver.ChromeOptions()
+
+    # Headless (use new headless when available)
+    if headless:
+        try:
+            options.add_argument("--headless=new")
+        except Exception:
+            options.add_argument("--headless")
+
+    # Standard server flags
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--lang=en-US")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--remote-debugging-port=9222")
+
+    # Attempt to detect chrome/chromium binary automatically (prefer env var if set)
+    chrome_bin = os.environ.get("CHROME_BIN")
+    if not chrome_bin:
+        # common binary names
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
+            path = shutil.which(name)
+            if path:
+                chrome_bin = path
+                break
+    if chrome_bin:
+        options.binary_location = chrome_bin
+
+    # Use webdriver-manager to install a matching chromedriver (no manual path needed)
+    driver_path = ChromeDriverManager().install()
+    service = ChromeService(executable_path=driver_path)
+
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.set_page_load_timeout(timeout)
+    driver.set_script_timeout(timeout)
+    return driver
+
+
 # ---- Selenium worker that performs the full flow ----
 def selenium_boost_worker(email: str, password: str, num_buttons: int, headless: bool,
                           wait_time: int = DEFAULT_WAIT_TIME) -> BoostResponse:
@@ -131,19 +186,9 @@ def selenium_boost_worker(email: str, password: str, num_buttons: int, headless:
     try:
         logs.append("Starting Selenium worker")
 
-        # Chrome options - suitable for servers
-        options = webdriver.ChromeOptions()
-        if headless:
-            options.add_argument("--headless=new")  # use new headless mode when available
-        options.add_argument("--disable-gpu")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1920,1080")
-        options.add_argument("--lang=en-US")
-
-        # Create driver (Selenium Manager will handle chromedriver)
-        driver = webdriver.Chrome(options=options)
-        wait = WebDriverWait(driver, wait_time)
+        # Create driver (auto-downloads chromedriver if needed)
+        driver = get_driver(headless=headless, timeout=wait_time or DEFAULT_WAIT_TIME)
+        wait = WebDriverWait(driver, wait_time or DEFAULT_WAIT_TIME)
 
         # --- LOGIN FLOW ---
         driver.get("https://www.affordablehousing.com/")
@@ -347,7 +392,7 @@ def selenium_boost_worker(email: str, password: str, num_buttons: int, headless:
 @app.post("/boost", response_model=BoostResponse)
 async def boost_endpoint(req: BoostRequest):
     # run Selenium in a background thread to avoid blocking event loop
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         result: BoostResponse = await loop.run_in_executor(
             None,
@@ -364,7 +409,36 @@ async def boost_endpoint(req: BoostRequest):
     return result
 
 
-# if you want to run uvicorn programmatically:
-# if __name__ == "__main__":
-#     import uvicorn
-#     uvicorn.run("app:app", host="0.0.0.0", port=8000, log_level="info")
+# ---- Diagnostics endpoint (use after deploy) ----
+@app.get("/diag")
+def diag():
+    """
+    Diagnostic info:
+    - detected chrome binary (auto)
+    - webdriver-manager chromedriver path
+    - CHROME_BIN / CHROMEDRIVER_PATH env values (if any)
+    """
+    detected = None
+    if os.environ.get("CHROME_BIN"):
+        detected = os.environ.get("CHROME_BIN")
+    else:
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"):
+            p = shutil.which(name)
+            if p:
+                detected = p
+                break
+
+    wdm_path = None
+    try:
+        wdm_path = ChromeDriverManager().install()
+    except Exception as e:
+        wdm_path = f"webdriver-manager error: {e}"
+
+    return {
+        "CHROME_BIN_env": os.environ.get("CHROME_BIN"),
+        "CHROMEDRIVER_PATH_env": os.environ.get("CHROMEDRIVER_PATH"),
+        "auto_detected_chrome_binary": detected,
+        "wdm_chromedriver_path": wdm_path,
+    }
+
+# (Optional) run with: uvicorn app:app --host 0.0.0.0 --port 8000
